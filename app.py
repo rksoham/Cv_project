@@ -5,63 +5,108 @@ import time
 
 app = Flask(__name__)
 
-# Start camera (Windows stable backend)
 camera = cv2.VideoCapture(0)
 time.sleep(2)
 
-if not camera.isOpened():
-    print("ERROR: Camera not opened")
-    
-kernel = np.ones((3, 3), np.uint8)
+kernel = np.ones((5,5),np.uint8)
+
+# Load face detector
+face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+
+
+def detect_shape(cnt):
+
+    shape = "object"
+
+    peri = cv2.arcLength(cnt, True)
+    approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
+
+    vertices = len(approx)
+
+    if vertices == 3:
+        shape = "Triangle"
+
+    elif vertices == 4:
+        x,y,w,h = cv2.boundingRect(approx)
+        aspectRatio = w / float(h)
+
+        if 0.95 <= aspectRatio <= 1.05:
+            shape = "Square"
+        else:
+            shape = "Rectangle"
+
+    elif vertices > 6:
+        shape = "Circle"
+
+    return shape
+
 
 def generate_frames():
+
     while True:
+
         success, frame = camera.read()
         if not success:
             continue
 
-        frame = cv2.resize(frame, (640, 480))
-        display = frame.copy()   # IMPORTANT
+        frame = cv2.resize(frame,(640,480))
+        display = frame.copy()
 
-        # Processing pipeline
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        thresh = cv2.adaptiveThreshold(
-            blur,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV,
-            11,
-            2
-        )
+        # ---------- REMOVE FACE ----------
+        faces = face_cascade.detectMultiScale(gray,1.3,5)
 
-        opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
-        closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel, iterations=2)
+        for (x,y,w,h) in faces:
+            cv2.rectangle(gray,(x,y),(x+w,y+h),(0,0,0),-1)
+            cv2.rectangle(display,(x,y),(x+w,y+h),(0,0,0),-1)
 
-        contours, _ = cv2.findContours(
-            closing,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
+        # ---------- OBJECT DETECTION ----------
+        blur = cv2.GaussianBlur(gray,(5,5),0)
 
-        # Count objects
+        edges = cv2.Canny(blur,50,150)
+
+        edges = cv2.dilate(edges,kernel,iterations=2)
+        edges = cv2.erode(edges,kernel,iterations=1)
+
+        contours,_ = cv2.findContours(edges,
+                                      cv2.RETR_EXTERNAL,
+                                      cv2.CHAIN_APPROX_SIMPLE)
+
         count = 0
-        for cnt in contours:
-            if cv2.contourArea(cnt) >200:
-                count += 1
-                x, y, w, h = cv2.boundingRect(cnt)
-                cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-        cv2.putText(
-            display,
-            f"Object Count: {count}",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2
-        )
+        for cnt in contours:
+
+            area = cv2.contourArea(cnt)
+
+            if area > 3000:
+
+                x,y,w,h = cv2.boundingRect(cnt)
+
+                # Ignore tall vertical shapes (like body/hand)
+                if h/w < 2.5:
+
+                    shape = detect_shape(cnt)
+
+                    cv2.rectangle(display,(x,y),(x+w,y+h),(0,255,0),2)
+
+                    cv2.putText(display,
+                                shape,
+                                (x,y-10),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6,
+                                (255,0,0),
+                                2)
+
+                    count += 1
+
+        cv2.putText(display,
+                    f"Objects: {count}",
+                    (20,40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0,0,255),
+                    2)
 
         ret, buffer = cv2.imencode('.jpg', display)
         frame = buffer.tobytes()
@@ -69,23 +114,20 @@ def generate_frames():
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
+
 @app.route('/')
 def index():
     return render_template('index.html')
+
 
 @app.route('/video_feed')
 def video_feed():
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
+
 if __name__ == "__main__":
     app.run(debug=True, threaded=True)
-
-
-
-
-
-
 
 
 
