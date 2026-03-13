@@ -1,120 +1,115 @@
+import webbrowser
+import logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
 from flask import Flask, render_template, Response
 import cv2
-import numpy as np
+from ultralytics import YOLO
+import threading
 import time
 
 app = Flask(__name__)
 
+model = YOLO("yolov8n")
+
 camera = cv2.VideoCapture(0)
-time.sleep(2)
+camera.set(cv2.CAP_PROP_FPS, 20)
+camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-kernel = np.ones((5,5),np.uint8)
+ignore_classes = ["person"]
 
-# Load face detector
-face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-
-
-def detect_shape(cnt):
-
-    shape = "object"
-
-    peri = cv2.arcLength(cnt, True)
-    approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-
-    vertices = len(approx)
-
-    if vertices == 3:
-        shape = "Triangle"
-
-    elif vertices == 4:
-        x,y,w,h = cv2.boundingRect(approx)
-        aspectRatio = w / float(h)
-
-        if 0.95 <= aspectRatio <= 1.05:
-            shape = "Square"
-        else:
-            shape = "Rectangle"
-
-    elif vertices > 6:
-        shape = "Circle"
-
-    return shape
+frame = None
+boxes = []
+frame_id = 0
 
 
+# ---------------- CAMERA THREAD ----------------
+def camera_thread():
+    global frame
+
+    while True:
+        ret, img = camera.read()
+        if not ret:
+            continue
+
+        frame = cv2.resize(img, (640,480))
+
+
+# ---------------- DETECTION THREAD ----------------
+def detection_thread():
+    global frame, boxes, frame_id
+
+    while True:
+
+        if frame is None:
+            time.sleep(0.01)
+            continue
+
+        frame_id += 1
+
+        # Run YOLO every 3 frames
+        if frame_id % 3 != 0:
+            time.sleep(0.01)
+            continue
+
+        results = model(frame, verbose=False)
+
+        new_boxes = []
+
+        for r in results:
+            for box in r.boxes:
+
+                cls = int(box.cls[0])
+                label = model.names[cls]
+
+                if label in ignore_classes:
+                    continue
+
+                x1,y1,x2,y2 = map(int,box.xyxy[0])
+                new_boxes.append((x1,y1,x2,y2))
+
+        boxes = new_boxes
+
+        time.sleep(0.02)
+
+
+# ---------------- VIDEO STREAM ----------------
 def generate_frames():
 
     while True:
 
-        success, frame = camera.read()
-        if not success:
+        if frame is None:
             continue
 
-        frame = cv2.resize(frame,(640,480))
         display = frame.copy()
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # ---------- REMOVE FACE ----------
-        faces = face_cascade.detectMultiScale(gray,1.3,5)
-
-        for (x,y,w,h) in faces:
-            cv2.rectangle(gray,(x,y),(x+w,y+h),(0,0,0),-1)
-            cv2.rectangle(display,(x,y),(x+w,y+h),(0,0,0),-1)
-
-        # ---------- OBJECT DETECTION ----------
-        blur = cv2.GaussianBlur(gray,(5,5),0)
-
-        edges = cv2.Canny(blur,50,150)
-
-        edges = cv2.dilate(edges,kernel,iterations=2)
-        edges = cv2.erode(edges,kernel,iterations=1)
-
-        contours,_ = cv2.findContours(edges,
-                                      cv2.RETR_EXTERNAL,
-                                      cv2.CHAIN_APPROX_SIMPLE)
-
         count = 0
 
-        for cnt in contours:
+        for (x1,y1,x2,y2) in boxes:
 
-            area = cv2.contourArea(cnt)
+            # Draw bounding box only
+            cv2.rectangle(display,(x1,y1),(x2,y2),(0,255,0),2)
 
-            if area > 3000:
+            count += 1
 
-                x,y,w,h = cv2.boundingRect(cnt)
-
-                # Ignore tall vertical shapes (like body/hand)
-                if h/w < 2.5:
-
-                    shape = detect_shape(cnt)
-
-                    cv2.rectangle(display,(x,y),(x+w,y+h),(0,255,0),2)
-
-                    cv2.putText(display,
-                                shape,
-                                (x,y-10),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.6,
-                                (255,0,0),
-                                2)
-
-                    count += 1
-
+        # Show only object count
         cv2.putText(display,
-                    f"Objects: {count}",
-                    (20,40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0,0,255),
-                    2)
+            f"Objects: {count}",
+            (20,60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.5,
+            (0,0,255),
+            3,
+            cv2.LINE_AA)
 
         ret, buffer = cv2.imencode('.jpg', display)
-        frame = buffer.tobytes()
+        frame_bytes = buffer.tobytes()
 
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 
+# ---------------- ROUTES ----------------
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -126,19 +121,19 @@ def video_feed():
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
-    app.run(debug=True, threaded=True)
 
+    threading.Thread(target=camera_thread, daemon=True).start()
+    threading.Thread(target=detection_thread, daemon=True).start()
 
+    url = "http://127.0.0.1:5000"
 
+    print("\nOpen:", url)
 
+    webbrowser.open(url)
 
-
-
-
-
-
-
+    app.run(debug=False, threaded=True)
 
 
 
